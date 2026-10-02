@@ -1,4 +1,4 @@
-short-description: 云图视频输入沙箱样本，CV功能待下一阶段加入
+short-description: 云图单视频输入与低内存CV分镜沙箱测试
 tags:
 - 云图
 - 沙箱测试
@@ -6,7 +6,7 @@ requires:
   env:
   - ENV_BACKEND_HOST
   - YUCE_AUTHORIZATION
-pre_input: '请执行云图视频输入样本A阶段。
+pre_input: '请执行云图视频CV分镜沙箱样本A+B阶段。
 
   云图授权账号：__field:rpa_shop__
 
@@ -30,7 +30,7 @@ pre_input: '请执行云图视频输入样本A阶段。
 
   详情素材数：__field:detail_top_n__
 
-  仅获取1条视频，完成CSV与媒体校验并交付技术报告。'
+  仅获取1条视频，完成CSV与媒体校验，再以低内存CV检测镜头与代表帧，交付完整技术报告。'
 skill_form:
 - key: rpa_shop
   type: rpa_shop
