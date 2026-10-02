@@ -1,0 +1,173 @@
+short-description: 云图视频输入沙箱样本，CV功能待下一阶段加入
+tags:
+- 云图
+- 沙箱测试
+requires:
+  env:
+  - ENV_BACKEND_HOST
+  - YUCE_AUTHORIZATION
+pre_input: '请执行云图视频输入样本A阶段。
+
+  云图授权账号：__field:rpa_shop__
+
+  行业：__field:industry__
+
+  分析周期：__field:date_range__
+
+  榜单截取方式：__field:ranking_metric__
+
+  全行业/指定品牌：__field:brand_scope__
+
+  品牌名称：__field:brands__
+
+  年龄筛选：__field:ages__
+
+  性别筛选：__field:genders__
+
+  八大人群筛选：__field:crowd_groups__
+
+  筛选与排序条件：__field:material_list__
+
+  详情素材数：__field:detail_top_n__
+
+  仅获取1条视频，完成CSV与媒体校验并交付技术报告。'
+skill_form:
+- key: rpa_shop
+  type: rpa_shop
+  label: 云图授权账号
+  description: 从云图 RPA 已授权账号中选择；榜单与素材详情两个步骤均使用此账号，不再分别填写
+  application_id: RPA_JULIANG_YT_ACCOUNT_PASSWORD
+  value_format: both
+  multiple: false
+  required: true
+- key: industry
+  type: input
+  label: 行业
+  description: 输入云图行业名称，例如食品饮料
+  placeholder: 例如：食品饮料
+  required: true
+- key: date_range
+  type: daterange
+  label: 分析周期
+  description: 结束日期最晚为执行日前4天；执行前由脚本校验
+  placeholder: 开始日期,结束日期
+  format: YYYY-MM-DD
+  value_format: YYYY-MM-DD
+  max_policy: t_plus_4
+  required: true
+- key: ranking_metric
+  type: select
+  label: 榜单截取方式
+  description: 选择远端榜单指标，候选池固定为 TOP1000
+  required: true
+  default: EXPOSURE_TOP1000
+  options:
+  - label: 曝光量 TOP1000
+    value: EXPOSURE_TOP1000
+  - label: CTR TOP1000
+    value: CTR_TOP1000
+  - label: 互动率 TOP1000
+    value: INTERACTION_RATE_TOP1000
+  - label: 完播率 TOP1000
+    value: COMPLETION_RATE_TOP1000
+- key: brand_scope
+  type: select
+  label: 全行业/指定品牌
+  description: 全行业或按指定品牌筛选
+  required: true
+  default: ALL_INDUSTRY
+  options:
+  - label: 全行业
+    value: ALL_INDUSTRY
+  - label: 指定品牌
+    value: SPECIFIED_BRANDS
+- key: brands
+  type: textarea
+  label: 品牌名称
+  description: 仅在指定品牌时填写 3 至 10 个品牌，用英文逗号分隔
+  placeholder: 小仙炖,燕之屋,五个女博士
+  required: true
+  rows: 2
+  max_length: 200
+  visible_when:
+    field: brand_scope
+    equals: SPECIFIED_BRANDS
+  depends_on:
+    brand_scope: SPECIFIED_BRANDS
+- key: ages
+  type: checkbox
+  label: 年龄筛选
+  description: 可选；多选年龄段，留空不过滤
+  options:
+  - label: 18-19 岁
+    value: AGE_18_19
+  - label: 20-23 岁
+    value: AGE_20_23
+  - label: 24-30 岁
+    value: AGE_24_30
+  - label: 31-35 岁
+    value: AGE_31_35
+  - label: 36-40 岁
+    value: AGE_36_40
+  - label: 41-45 岁
+    value: AGE_41_45
+  - label: 46-50 岁
+    value: AGE_46_50
+  - label: 51-55 岁
+    value: AGE_51_55
+  - label: 56-59 岁
+    value: AGE_56_59
+  - label: 60 岁以上
+    value: AGE_60_PLUS
+  required: false
+- key: genders
+  type: checkbox
+  label: 性别筛选
+  description: 可选；多选性别，留空不过滤
+  options:
+  - label: 男性
+    value: MALE
+  - label: 女性
+    value: FEMALE
+  required: false
+- key: crowd_groups
+  type: checkbox
+  label: 八大人群筛选
+  description: 可选；多选八大人群，留空不过滤
+  options:
+  - label: 小镇青年
+    value: TOWN_YOUTH
+  - label: Gen Z
+    value: GENZ
+  - label: 中老年
+    value: SENIOR_MIDDLE
+  - label: 精致妈妈
+    value: REFINED_MOM
+  - label: 新白领
+    value: NEW_WHITE_COLLAR
+  - label: 都市银发
+    value: URBAN_SILVER
+  - label: 小镇中老年
+    value: TOWN_MIDDLE_ELDER
+  - label: 都市蓝领
+    value: URBAN_BLUE_COLLAR
+  required: false
+- key: material_list
+  type: textarea
+  label: 筛选与排序条件
+  description: 可选；用自然语言描述筛选条件和排序方向，技能会在完整 TOP1000 落盘后转换并本地执行，不改变远端榜单参数
+  placeholder: 例如：先落盘完整TOP1000后按“曝光量”>=1000000且“视频标题”包含“燕窝”，再按“互动率”降序
+  required: false
+  rows: 3
+  max_length: 4000
+- key: detail_top_n
+  type: number
+  label: 详情素材数
+  description: 当前样本只获取一条视频，用于后续沙箱CV测试的输入验证
+  required: true
+  default: 1
+  min: 1
+  max: 1
+  step: 1
+  precision: 0
+  addon_after: 条

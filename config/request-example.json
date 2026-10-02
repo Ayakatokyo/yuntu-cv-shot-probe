@@ -1,0 +1,32 @@
+{
+  "rpa_shop": "所选RPA账号extra.shop_id",
+  "query_spec": {
+    "schema_version": 1,
+    "source": "juliang_yuntu_industry_content_rankings",
+    "industry": "食品饮料",
+    "period": {
+      "type": "CUSTOM",
+      "start_date": "2026-09-20",
+      "end_date": "2026-09-21"
+    },
+    "filters": {
+      "brand_scope": {
+        "type": "ALL_INDUSTRY",
+        "brands": []
+      }
+    },
+    "ranking": {
+      "metric": "EXPOSURE_TOP1000"
+    },
+    "collection": {
+      "target_top_n": 1
+    },
+    "material_list": {
+      "filters": [],
+      "sort": {
+        "field": "rank",
+        "direction": "asc"
+      }
+    }
+  }
+}
