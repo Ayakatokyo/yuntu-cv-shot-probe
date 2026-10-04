@@ -102,6 +102,14 @@
     {
       "source": "scripts/memory_guard.py",
       "destination": "scripts/memory_guard.py"
+    },
+    {
+      "source": "scripts/runtime_memory.py",
+      "destination": "scripts/runtime_memory.py"
+    },
+    {
+      "source": "config/memory-policy.json",
+      "destination": "config/memory-policy.json"
     }
   ]
 }
