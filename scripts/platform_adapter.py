@@ -13,10 +13,10 @@ DETAIL_CODE='rpa.conn.juliang.yt.industry.content.rankings.details'
 def validate(raw):
     if not isinstance(raw,dict) or set(raw)-{'rpa_shop','query_spec'}:raise ProbeError('request_invalid')
     spec=resolve_query_spec(deepcopy(raw.get('query_spec')))
-    if spec['collection']['target_top_n']!=1:raise ProbeError('sample_requires_one_material')
+    if not 1<=spec['collection']['target_top_n']<=10:raise ProbeError('batch_count_invalid')
     return {'rpa_shop':resource_id(raw.get('rpa_shop')),'query_spec':spec}
 
-def select(request,root,gateway):
+def select_many(request,root,gateway):
     spec=request['query_spec'];params=query_to_rpa_params(spec)
     for key in ('ages','genders','crowd_groups','brands'):
         if isinstance(params.get(key),list):params[key]=','.join(params[key])
@@ -28,8 +28,11 @@ def select(request,root,gateway):
     write(root/'acquisition/selection-source.json',artifact(path,root))
     selected=select_materials(records,spec['material_list'],default_material_field_registry())
     if not selected:raise ProbeError('selection_empty')
-    material=selected[0];params=detail_to_rpa_params(spec);params['material_id']=material['material_id']
-    return material,params
+    result=[]
+    for material in selected[:count(request)]:
+        params=detail_to_rpa_params(spec);params['material_id']=material['material_id']
+        result.append((material,params))
+    return result
 
 def video_source(csv_path,material,params):
     rows=parse_csv_records(csv_path)
@@ -49,3 +52,9 @@ def video_source(csv_path,material,params):
     if not candidates or len({v for _,v,_ in candidates})!=1:raise ProbeError('video_url_missing_or_conflicting')
     index,url,field=candidates[0]
     return {'materialId':material['material_id'],'url':url,'csvPath':str(csv_path.name),'recordIndex':index,'fieldPath':field,'identityStatus':'matched','periodStatus':'matched','expectedMedia':{'durationSec':material.get('video_duration')}}
+
+def count(request):return request['query_spec']['collection']['target_top_n']
+
+def select(request,root,gateway):
+    if count(request)!=1:raise ProbeError('use_run_batch')
+    return select_many(request,root,gateway)[0]

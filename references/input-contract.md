@@ -1,8 +1,14 @@
+# 0.5.0当前输入与交付契约
+
+run-batch接受平台原QuerySpec与授权项，数量1–10；acquire仅数量1，批量拒绝use_run_batch。一次选材队列按已确认排序选择不同ID，数量不足标partial/shortageCount，绝不补位。千川targetTopN=candidateTopN，云图target_top_n≤10且candidate_top_n=1000。每条绑定原请求/共享源SHA/选择与队列SHA，源硬链接不复制报表；任意源变化停止。首条详情CSV必须确认真实、可解析、身份/周期匹配才继续，失败/未知/blocked停止全队列。授权、日期、字段语义沿用以下既有契约。
+
+默认交付内嵌代表帧的单HTML；export-html校验已完成report.json快照收据及CV收据/镜头/帧，不读CSV或MP4，不具备重新验证完整A能力；完整A审计仍用verify，视频输入使用probe-cv时仍全验证。未提供完整A输入不能从HTML恢复B。旧export-report为显式审计大包选项，不能因为默认只有HTML称交付缺视频。旧节中“必须完整ZIP”为历史技术包规则，默认已由本节替代。
+
 # 输入与恢复契约
 
 request.json 包含 query_spec 及所选授权 ID；使用 config/request-example.json 的结构，示例日期需按本次用户输入替换。字段注册表来自本包config，不用另装元技能。
 
-云图：rpa_shop。query_spec沿用云图元技能；collection.target_top_n必须1，candidate_top_n固定1000。多选筛选编码由程序转为实时连接器要求的字符串。
+云图：rpa_shop。query_spec沿用云图元技能；collection.target_top_n为1–10，candidate_top_n固定1000。多选筛选编码由程序转为实时连接器要求的字符串。
 
 元技能的完整日期、筛选/排序语义沿用；样本取消高光规则，只准备输入。CLI acquire 涉及授权线上取数，validate/status/verify/render-report为本地操作。未知状态只检查既有task ID；resume是用户明确恢复后的入口，不自动调用。
 
