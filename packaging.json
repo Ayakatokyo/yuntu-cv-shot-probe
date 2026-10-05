@@ -110,6 +110,10 @@
     {
       "source": "config/memory-policy.json",
       "destination": "config/memory-policy.json"
+    },
+    {
+      "source": "scripts/serial_probe.py",
+      "destination": "scripts/serial_probe.py"
     }
   ]
 }
