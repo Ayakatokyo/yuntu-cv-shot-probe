@@ -16,7 +16,7 @@ class MemoryGuardTests(unittest.TestCase):
         g=evaluate_guard(snapshot(inactive=0),cv.config_value());self.assertTrue(g['abort']);self.assertEqual(g['reason'],'working_set_ceiling')
         g=evaluate_guard(snapshot(usage=980),cv.config_value());self.assertTrue(g['abort']);self.assertEqual(g['reason'],'raw_emergency_ceiling')
     def test_dirty_shared_memory_and_missing_stats_are_not_all_free(self):
-        s=snapshot();s['memory.stat']+=f'\ntotal_shmem {100*M}\ntotal_dirty {300*M}'
+        s=snapshot();s['memory.stat']=s['memory.stat'].replace('total_dirty 0',f'total_dirty {320*M}')
         self.assertTrue(evaluate_guard(s,cv.config_value())['abort'])
         s=snapshot();s.pop('memory.stat');g=evaluate_guard(s,cv.config_value());self.assertTrue(g['abort']);self.assertEqual(g['guardBasis'],'raw_usage_fallback')
     def test_v2_pressure_events_and_independent_process_budget(self):
@@ -35,7 +35,7 @@ class MemoryGuardTests(unittest.TestCase):
     def test_missing_any_deduction_field_forces_raw_usage_v1_v2(self):
         cases=[snapshot(),{'status':'available','version':2,'memory.current':str(850*M),'memory.max':str(1024*M),'memory.stat':f'file {682*M}\ninactive_file {336*M}\nshmem 0\nfile_dirty 0\nfile_writeback 0'}]
         for observed in cases:
-            keys=('total_shmem','total_dirty','total_writeback') if observed['version']==1 else ('shmem','file_dirty','file_writeback')
+            keys=('total_dirty','total_writeback') if observed['version']==1 else ('shmem','file_dirty','file_writeback')
             for key in keys:
                 with self.subTest(version=observed['version'],key=key):
                     s={**observed,'memory.stat':'\n'.join(line for line in observed['memory.stat'].splitlines() if not line.startswith(key+' '))}

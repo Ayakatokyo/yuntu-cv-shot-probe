@@ -185,7 +185,8 @@ class CvTests(unittest.TestCase):
     def test_cv_reserve_blocks_below_raw_stop_and_no_second_media_probe(self):
         self.acquire()
         from test_memory_guard import snapshot
-        with patch.object(cv,'cgroup_snapshot',return_value=snapshot(usage=850)):
+        observed=snapshot(usage=425,inactive=60);observed['memory.limit_in_bytes']=str(512*1048576)
+        with patch.object(cv,'cgroup_snapshot',return_value=observed):
             result=cv.probe_cv(self.root,attempt_id='reserve-block')
         self.assertEqual(result['status'],'failed')
         guard=core.read(self.root/'cv/reserve-block/memory-guard.json')

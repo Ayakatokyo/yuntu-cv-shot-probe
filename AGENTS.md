@@ -1,6 +1,7 @@
 # yuntu-cv-shot-probe
 
 本仓独立维护沙箱样本。修改前读 SKILL.md、README、packaging.json 和项目管理现行设计。
+- 0.5.5守卫：v1 file LRU排除shmem，dirty/writeback缺失仅独立可信native-proc全局观测代理可补；95%为严格缓存准入复核而非无条件停止，原80/95/256和reserve数值不变但语义改变。阶段预留覆盖80%软线/树预算；raw到额度或当前OOM/新failcnt/压力/未知证据仍停，固定baseline不重置。
 - 当前A取视频+B低内存CV；不引入ASR/OCR/模型分析。CV必须复用A已校验输入，由独立受监督worker执行。
 - 迁移实现按 migration/source-manifest.json 维护，不能运行时导入兄弟仓。
 - 测试用 python3.12 -B tools/test.py；打包用 python3.12 -B tools/build.py。

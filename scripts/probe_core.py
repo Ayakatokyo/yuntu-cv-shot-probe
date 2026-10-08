@@ -102,6 +102,38 @@ def resource_id(value):
     if not isinstance(value, str) or not value.strip(): raise ProbeError('authorization_selection_invalid')
     return value.strip()
 
+def native_proc_meminfo_source(mounts):
+    """Prove the fixed meminfo path belongs to an uncovered native /proc mount."""
+    target=Path('/proc/meminfo')
+    if Path('/proc').is_symlink() or target.is_symlink():raise ProbeError('native_meminfo_symlink')
+    candidates=[]
+    def unescape(value):
+        return re.sub(r'\\([0-7]{3})',lambda match:chr(int(match[1],8)),value)
+    for mount in mounts:
+        try:
+            left,right=mount.split(' - ',1);fields=left.split();kind=right.split()[0]
+            mount_root=unescape(fields[3]);point=unescape(fields[4])
+        except (IndexError,ValueError):raise ProbeError('native_meminfo_mount_invalid')
+        if str(target)==point or str(target).startswith(point.rstrip('/')+'/'):
+            candidates.append((len(point),kind,mount_root,point))
+    if not candidates:raise ProbeError('native_meminfo_mount_unverified')
+    longest=max(item[0] for item in candidates);matches=[item for item in candidates if item[0]==longest]
+    if len(matches)!=1 or matches[0][1:]!=('proc','/','/proc'):raise ProbeError('native_meminfo_mount_unverified')
+    return {'path':'/proc/meminfo','fstype':'proc','mountRoot':'/','mountPoint':'/proc'}
+
+
+def native_proc_meminfo_read():
+    from memory_guard import parse_native_meminfo
+    target=Path('/proc/meminfo')
+    if Path('/proc').is_symlink() or target.is_symlink():raise ProbeError('native_meminfo_symlink')
+    fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'r',encoding='ascii') as handle:
+        raw=handle.read(65537)
+    if len(raw)>65536:raise ProbeError('native_meminfo_size_limit')
+    parse_native_meminfo(raw)
+    return '\n'.join(line for line in raw.splitlines() if line.split() and line.split()[0] in ('Dirty:','Writeback:'))+'\n'
+
+
 def cgroup_snapshot():
     # Resolve mount + membership; do not assume /sys/fs/cgroup is the process group.
     try:
@@ -121,17 +153,35 @@ def cgroup_snapshot():
                 else:continue
                 directory=mount_point/relative
                 result={'version':2 if v2 else 1, 'status':'available'}
+                meminfo={'status':'unavailable','errorCode':'native_meminfo_not_needed'}
+                if not v2:
+                    try:
+                        meminfo={'status':'sampling','source':native_proc_meminfo_source(mounts),'before':native_proc_meminfo_read(),'sampleTimes':{'before':time.time()}}
+                    except (OSError,ValueError,ProbeError,UnicodeError) as exc:
+                        meminfo={'status':'unavailable','errorCode':getattr(exc,'code','native_meminfo_unavailable')}
                 names=('memory.current','memory.max','memory.peak','memory.events','memory.events.local','memory.stat','memory.pressure') if v2 else ('memory.usage_in_bytes','memory.limit_in_bytes','memory.max_usage_in_bytes','memory.failcnt','memory.oom_control','memory.stat','memory.pressure')
                 for name in names:
                     try:result[name]=(directory/name).read_text().strip()
                     except OSError:result[name]=None
+                if not v2:
+                    if meminfo.get('status')=='sampling':
+                        try:
+                            from memory_guard import parse_native_meminfo
+                            meminfo['after']=native_proc_meminfo_read();meminfo['sampleTimes']['after']=time.time()
+                            if native_proc_meminfo_source(Path('/proc/self/mountinfo').read_text().splitlines())!=meminfo['source']:
+                                raise ProbeError('native_meminfo_mount_changed')
+                            before=parse_native_meminfo(meminfo['before']);after=parse_native_meminfo(meminfo['after'])
+                            meminfo.update(status='available',upperBoundsBytes={key:max(before[key],after[key]) for key in before})
+                        except (OSError,ValueError,ProbeError,UnicodeError) as exc:
+                            meminfo.update(status='unavailable',errorCode=getattr(exc,'code','native_meminfo_unavailable'))
+                    result['nativeProcMeminfo']=meminfo
                 return result
     except (OSError, ValueError):pass
     return {'status':'unavailable'}
 
 class Resources:
-    def __init__(self, root, interval=1):
-        self.interval=interval; self.root=root; self.stop=threading.Event(); self.thread=None; self.attempt=uuid.uuid4().hex
+    def __init__(self, root, interval=1, *, baseline=None):
+        self.interval=interval; self.root=root; self.stop=threading.Event(); self.thread=None; self.attempt=uuid.uuid4().hex; self.baseline=cgroup_snapshot() if baseline is None else baseline
     def sample(self):
         status=read(self.root/'status.json')
         raw=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
@@ -144,7 +194,7 @@ class Resources:
         from memory_guard import process_tree_rss, evaluate_guard
         tree_rss=process_tree_rss(os.getpid())
         row={'attemptId':self.attempt,'processTreeSampledRssBytes':tree_rss,'time':time.time(),'stage':status.get('stage'),'pid':os.getpid(),'rssBytes':rss,'processLifetimeHwmBytes':raw if sys.platform=='darwin' else raw*1024,'cgroup':cgroup_snapshot()}
-        row['memoryEstimate']=evaluate_guard(row['cgroup'],read(ROOT/'config/cv-low-memory.json'),tree_rss=tree_rss)
+        row['memoryEstimate']=evaluate_guard(row['cgroup'],read(ROOT/'config/cv-low-memory.json'),baseline=self.baseline,tree_rss=tree_rss)
         with (self.root/'resources.ndjson').open('a',encoding='utf-8') as handle:
             handle.write(json.dumps(row)+'\n'); handle.flush()
         return row

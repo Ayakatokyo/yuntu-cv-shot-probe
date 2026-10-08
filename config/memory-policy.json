@@ -8,5 +8,5 @@
     "cv_precheck": 128,
     "export": 32
   },
-  "note": "Experimental reserves below the Skill raw emergency ceiling; not free RAM or a sandbox guarantee."
+  "note": "Stage reserves below conservative working-set soft/raw ceilings and remaining process-tree budget; estimates are not free RAM or guaranteed reclaim. Raw 95% invokes strict v1 cache-backed admission in policy 0.5.5."
 }
