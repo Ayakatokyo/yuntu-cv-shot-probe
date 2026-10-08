@@ -69,7 +69,8 @@ def batch_status(root):
         observed.append({'index':entry.get('index'),'materialId':entry.get('materialId'),
                          'status':entry['status'],'acquisitionStatus':acquisition.get('status') or entry.get('acquisitionStatus','pending'),
                          'cvStatus':cv['status'],'attemptId':cv['attemptId'],'cv':cv,
-                         'errorCode':cv.get('errorCode') or entry.get('errorCode')})
+                         'errorCode':cv.get('errorCode') or entry.get('errorCode'),'rpaStatus':entry.get('rpaStatus'),
+                         'rpaWave':entry.get('rpaWave'),'taskId':entry.get('taskId')})
     selected=batch.get('selectedCount',len(entries))
     if type(selected) is not int or selected!=len(entries):raise ProbeError('batch_status_invalid')
     if counts['failed']:cv_status='failed'
@@ -95,6 +96,9 @@ def batch_status(root):
             'cv':{'status':cv_status,'completedCount':counts['succeeded'],'failedCount':counts['failed'],
                   'runningCount':counts['running'],'pendingCount':counts['pending'],'interruptedCount':counts['interrupted'],
                   'unconfirmedCount':counts['unconfirmed'],'shotCount':total_shots},
-            'entries':observed,'report':batch.get('report'),
+            'rpaConcurrency':batch.get('rpaConcurrency',1),'mediaConcurrency':batch.get('mediaConcurrency',1),
+            'cvConcurrency':batch.get('cvConcurrency',1),'acquisitionPhase':batch.get('acquisitionPhase'),
+            'rpaSubmissionCount':batch.get('rpaSubmissionCount'),'rpaWaves':batch.get('rpaWaves'),
+            'firstBatchCsvGate':batch.get('firstBatchCsvGate'),'entries':observed,'report':batch.get('report'),
             'nextAction':'wait_for_batch' if status=='running' else 'view_report' if status in ('succeeded','partial') else 'inspect_saved_state_no_automatic_retry',
             'verification':'read_only_status_metadata_not_artifact_revalidation'}
