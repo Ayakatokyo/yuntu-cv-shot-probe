@@ -122,6 +122,14 @@
     {
       "source": "scripts/visual_report.py",
       "destination": "scripts/visual_report.py"
+    },
+    {
+      "source": "config/media-input-policy.json",
+      "destination": "config/media-input-policy.json"
+    },
+    {
+      "source": "scripts/batch_status.py",
+      "destination": "scripts/batch_status.py"
     }
   ]
 }

@@ -1,5 +1,6 @@
 """Bounded serial acceptance queue over existing A inputs; never acquires data."""
 from pathlib import Path
+import os
 import uuid
 from probe_core import ROOT, ProbeError, external_root, read, write, digest, resource_summary, safe_error
 from runtime_memory import StageMonitor
@@ -29,18 +30,19 @@ def probe_batch(manifest_file, output, *, delivery_mode='html'):
     batch_id='serial-'+uuid.uuid4().hex[:12]
     entries=[{'index':i,'runDir':str(root),'attemptId':batch_id+'-'+str(i),'status':'pending'} for i,root in enumerate(roots,1)]
     result={'schemaVersion':1,'packageVersion':read(ROOT/'config/platform.json')['version'],
-            'platform':read(ROOT/'config/platform.json')['platform'],'batchId':batch_id,'status':'running',
+            'platform':read(ROOT/'config/platform.json')['platform'],'batchId':batch_id,'status':'running','stage':'cv_precheck','pid':os.getpid(),
             'manifestSha256':digest(manifest_file),'concurrency':1,'acquisition':'reused_A_only',
             'entries':entries,'completedCount':0,'requestedCount':len(entries)}
     write(output/'batch.json',result)
     monitor=StageMonitor(output,'batch_precheck')
     try:
-        from cv_probe import probe_cv, verify_cv
+        from cv_probe import probe_cv, verify_cv,process_identity
+        result['processStartTicks']=process_identity(result['pid']);write(output/'batch.json',result)
         from delivery import export_report
         with monitor:
             for entry,root in zip(entries,roots):
                 monitor.checkpoint('batch_cv_'+str(entry['index']))
-                entry['status']='running';write(output/'batch.json',result)
+                result['stage']='cv';entry.update(status='running',cvStatus='running');write(output/'batch.json',result)
                 probe_cv(root,attempt_id=entry['attemptId'],backend='ffmpeg-scene')
                 receipt=read(root/'cv'/entry['attemptId']/'receipt.json')
                 entry.update(cvStatus=receipt['status'],inputVideoSha256=receipt['inputVideoSha256'],
@@ -50,6 +52,7 @@ def probe_batch(manifest_file, output, *, delivery_mode='html'):
                 verify_cv(root,entry['attemptId'])
                 monitor.checkpoint('batch_export_'+str(entry['index']))
                 if delivery_mode=='audit':
+                    result['stage']='delivery';write(output/'batch.json',result)
                     entry['export']=export_report(root,output/('item-'+str(entry['index'])),expected_attempt=entry['attemptId'])
                 else:
                     # Keep a small immutable snapshot; repeated A inputs can have distinct attempts.
@@ -63,10 +66,10 @@ def probe_batch(manifest_file, output, *, delivery_mode='html'):
                 monitor.checkpoint('batch_item_complete_'+str(entry['index']))
             if delivery_mode=='html':
                 from visual_report import export_batch_html
-                result['status']='succeeded';write(output/'batch.json',result)
+                result.update(status='succeeded',stage='delivery');write(output/'batch.json',result)
                 result['report']=export_batch_html(output,output/'index.html')
         monitor.check()
-        result['status']='succeeded'
+        result.update(status='succeeded',stage='complete')
     except Exception as exc:
         result.update(status='failed',errorCode=getattr(exc,'code','batch_failed'),message=safe_error(exc))
         for entry in entries:
