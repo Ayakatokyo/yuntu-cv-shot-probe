@@ -8,7 +8,7 @@ import tempfile
 import zipfile
 from probe_core import ProbeError, artifact, digest, read, write, safe_file, run_lock, report, resource_summary, ROOT, safe_error
 
-def verify_export(root):
+def verify_export(root, *, _observation_root=None):
     root=Path(root)
     if not (root/'bundle-manifest.json').is_file():raise ProbeError('delivery_manifest_missing')
     manifest=read(root/'bundle-manifest.json')
@@ -23,7 +23,7 @@ def verify_export(root):
         if prefix+'shots.json' not in paths or any(prefix+s['frameRef'] not in paths for s in cv['shots']):raise ProbeError('delivery_cv_missing')
     for item in manifest['artifacts']:
         path=safe_file(root,item['path'])
-        if artifact(path,root)!=item:raise ProbeError('delivery_artifact_changed')
+        if artifact(path,root,cache_stage='export_verify_sha256' if _observation_root and path.suffix.lower() in ('.mp4','.csv') else None,log_root=_observation_root)!=item:raise ProbeError('delivery_artifact_changed')
     html_path=root/'report/index.html'
     for target in re.findall(r'(?:src|href)=["\']([^"\']+)',html_path.read_text()):
         if target.startswith('data:image/jpeg;base64,'):continue
@@ -59,7 +59,7 @@ def zip_bounded(path, root, monitor):
                     dst.write(chunk)
 
 
-def export_report(root,destination,*,expected_attempt=None):
+def export_report(root,destination,*,expected_attempt=None,_report_snapshot=None):
     root=Path(root);destination=Path(destination)
     archive=destination.with_name(destination.name+'.zip')
     evidence=destination.with_name(destination.name+'.memory')
@@ -77,28 +77,40 @@ def export_report(root,destination,*,expected_attempt=None):
             scratch=Path(tempfile.mkdtemp(prefix='.report-export-',dir=destination.parent))
             fd,tmpzip=tempfile.mkstemp(prefix='.report-bundle-',suffix='.zip',dir=destination.parent);os.close(fd)
             monitor.checkpoint('export_render')
-            report(root);public=read(root/'report/report.json')
-            if expected_attempt is not None and public.get('cv',{}).get('attemptId')!=expected_attempt:
-                raise ProbeError('delivery_cv_attempt_changed')
+            if _report_snapshot is None:
+                report(root);public=read(root/'report/report.json')
+                if expected_attempt is not None and public.get('cv',{}).get('attemptId')!=expected_attempt:
+                    raise ProbeError('delivery_cv_attempt_changed')
+                for relative in ('report/index.html','report/report.json','report/receipt.json'):
+                    copy_bounded(safe_file(root,relative),scratch/relative,monitor)
+            else:
+                from visual_report import load_public, write_visual
+                from cv_probe import verify_cv
+                frozen=Path(_report_snapshot['reportSnapshot'])
+                if digest(safe_file(frozen,'report/report.json'))!=_report_snapshot['reportSnapshotSha256']:raise ProbeError('report_snapshot_changed')
+                public,folder=load_public(frozen,expected_attempt,root)
+                if public.get('cv',{}).get('status')=='succeeded':verify_cv(root,public['cv']['attemptId'])
+                write(scratch/'report/report.json',public)
+                write_visual(scratch/'report/index.html',[(public,folder)],monitor=monitor)
+                write(scratch/'report/receipt.json',{'artifacts':[artifact(scratch/'report/report.json',scratch),artifact(scratch/'report/index.html',scratch)]})
             monitor.checkpoint('export_copy')
-            for relative in ('report/index.html','report/report.json','report/receipt.json','resources.ndjson'):
-                copy_bounded(safe_file(root,relative),scratch/relative,monitor)
+            copy_bounded(safe_file(root,'resources.ndjson'),scratch/'resources.ndjson',monitor)
             if public.get('videoPath'):
                 relative='media/source-video.mp4';src=safe_file(root,relative)
-                if artifact(src,root)!=public['videoArtifact']:raise ProbeError('artifact_changed')
+                if artifact(src,root,cache_stage='audit_video_sha256')!=public['videoArtifact']:raise ProbeError('artifact_changed')
                 monitor.check();copy_bounded(src,scratch/relative,monitor)
             cv=public.get('cv',{})
             if cv.get('attemptId'):
                 prefix='cv/'+cv['attemptId']+'/'
-                selected=['config.json','resources.ndjson','shots.json','status.json','receipt.json','worker-environment.json','boundaries.ndjson','supervisor-failure.json','worker-failure.json','memory-guard.json','memory-admission.json','guard-samples.ndjson']+[s['frameRef'] for s in cv.get('shots',[]) if s['representativeStatus']=='available']
+                selected=['config.json','resources.ndjson','shots.json','status.json','receipt.json','worker-environment.json','boundaries.ndjson','supervisor-failure.json','worker-failure.json','memory-guard.json','memory-admission.json','guard-samples.ndjson','cache-advice.ndjson']+[s['frameRef'] for s in cv.get('shots',[]) if s['representativeStatus']=='available']
                 for relative in selected:
                     if (root/prefix/relative).exists():copy_bounded(safe_file(root,prefix+relative),scratch/prefix/relative,monitor)
             for relative in ('phase-memory.ndjson','phase-memory.json','cache-advice.ndjson'):
                 if (root/relative).exists():copy_bounded(safe_file(root,relative),scratch/relative,monitor)
             monitor.checkpoint('export_verify_copies')
-            artifacts=[artifact(p,scratch) for p in sorted(scratch.rglob('*')) if p.is_file()]
+            artifacts=[artifact(p,scratch,cache_stage='audit_copy_sha256' if p.suffix.lower() in ('.mp4','.csv') else None,log_root=evidence) for p in sorted(scratch.rglob('*')) if p.is_file()]
             write(scratch/'bundle-manifest.json',{'schemaVersion':1,'status':public['status'],'containsPrivateSources':False,'artifacts':artifacts})
-            verify_export(scratch)
+            verify_export(scratch,_observation_root=evidence)
             monitor.checkpoint('export_zip')
             zip_bounded(tmpzip,scratch,monitor)
             monitor.checkpoint('export_verify_zip')

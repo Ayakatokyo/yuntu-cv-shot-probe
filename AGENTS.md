@@ -5,5 +5,7 @@
 - 迁移实现按 migration/source-manifest.json 维护，不能运行时导入兄弟仓。
 - 测试用 python3.12 -B tools/test.py；打包用 python3.12 -B tools/build.py。
 - 保留动态契约、授权、CSV/身份/周期门禁；run-batch一次榜单选1–10条不同素材，先每批最多3条详情RPA、收齐CSV并串行下载/核验视频，全部A就绪后串行B分镜，无补位/自动重提；acquire单条保留，probe-cv-batch复用显式已有A。默认只交付可视化HTML，完整ZIP仅显式审计。
+- 批量A/B内部_defer_report只落盘必要数据，B完成后小JSON快照冻结attempt/SHA、receipt核验和资源摘要后release_item再下一条；全部队列结束才HTML，显式审计也后置。memory/phase守卫或cleanup未确认禁止补报告；不提高阈值。
+- 自有MP4/CSV完整SHA用页对齐有界digest_owned并记录建议，不能作用依赖二进制/全局缓存；快照/帧用repeatable factory逐条核验释放，不能聚集全批report对象。
 - 来源/输出均在仓外，媒体、凭证、运行数据、环境不进入 Git/ZIP。
 - 每次优化同步项目管理的唯一进度与总规划；提交/推送/发布按当前授权。

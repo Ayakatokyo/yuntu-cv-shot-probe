@@ -39,6 +39,8 @@ class BatchVisualTests(unittest.TestCase):
                 self.assertEqual(core.read(Path(item['runDir'])/'status.json')['status'],'video_ready')
             for previous in saved['entries'][:len(order)]:
                 self.assertEqual(previous['processCleanup']['status'],'completed')
+            self.assertFalse(list(output.rglob('*.html')))
+            self.assertTrue(kwargs['_defer_report'])
             order.append(Path(root).name)
             return original(root,**kwargs)
         with patch.object(cv_probe,'probe_cv',side_effect=ordered_cv):
@@ -53,6 +55,9 @@ class BatchVisualTests(unittest.TestCase):
         self.assertEqual(result['completedCount'],3);self.assertEqual(self.state['selectionCalls'],1)
         self.assertEqual(len(set(self.state['detailIds'])),3);self.assertEqual(result['distinctVideoCount'],2)
         self.assertFalse(list(output.rglob('*.zip')))
+        self.assertEqual(list(output.rglob('*.html')),[output/'index.html'])
+        for entry in result['entries']:
+            self.assertEqual(core.digest(Path(entry['reportSnapshot'])/'report/report.json'),entry['reportSnapshotSha256'])
         source_ref=core.read(output/'selection/acquisition/selection-source.json')
         source=output/'selection'/source_ref['path']
         for entry in result['entries']:
@@ -224,3 +229,77 @@ class BatchVisualTests(unittest.TestCase):
         self.assertEqual(result['acquiredCount'],3);self.assertEqual(result['completedCount'],0)
         self.assertEqual(result['errorCode'],'synthetic_phase_guard')
         self.assertEqual([e['cvStatus'] for e in result['entries']],['pending']*3)
+
+    def test_completed_item_snapshot_and_release_precede_next_worker(self):
+        import cv_probe
+        original=cv_probe.probe_cv;original_release=batch.release_item;events=[];output=self.parent/'release-order'
+        def worker(root,**kwargs):
+            if events:self.assertEqual(events[-1][0],'release')
+            events.append(('cv',kwargs['attempt_id']));return original(root,**kwargs)
+        def release(root,stage,**kwargs):
+            if stage=='batch_A_barrier':return original_release(root,stage,**kwargs)
+            attempt=kwargs['attempt_id'];self.assertEqual(core.read(Path(root)/'cv'/attempt/'receipt.json')['processCleanup']['status'],'completed')
+            self.assertTrue((Path(kwargs['report_root'])/'report/receipt.json').exists())
+            saved=next(e for e in core.read(output/'batch.json')['entries'] if e.get('attemptId')==attempt)
+            self.assertIn('memoryObservation',saved);self.assertEqual(saved['reportSnapshot'],kwargs['report_root'])
+            events.append(('release',attempt));return original_release(root,stage,**kwargs)
+        with patch.object(cv_probe,'probe_cv',side_effect=worker),patch.object(batch,'release_item',side_effect=release):result=batch.run_batch(self.request(),output)
+        self.assertEqual(result['status'],'succeeded',result);self.assertEqual([e[0] for e in events],['cv','release']*3)
+        for entry in result['entries']:cv_probe.verify_cv(Path(entry['runDir']),entry['attemptId'])
+
+    def test_attempt_guard_skips_final_report_even_without_queue_latch(self):
+        import cv_probe
+        original=cv_probe.probe_cv;calls=0
+        def guard(root,attempt_id,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==1:return original(root,attempt_id=attempt_id,**kwargs)
+            core.write(Path(root)/'cv'/attempt_id/'receipt.json',{'status':'failed','errorCode':'memory_guard_aborted','inputVideoSha256':'hash','workerExitCode':-15,'processCleanup':{'status':'completed'},'memoryGuard':{'reason':'working_set_ceiling'}})
+        with patch.object(cv_probe,'probe_cv',side_effect=guard),patch.object(visual,'export_batch_html') as export,patch.object(visual,'snapshot_pending_entries') as snapshots:
+            result=batch.run_batch(self.request(),self.parent/'inner-guard')
+        export.assert_not_called();snapshots.assert_not_called();self.assertEqual(result['guardStopReason'],'working_set_ceiling')
+        self.assertEqual(result['guardStopOrigin'],'cv_attempt');self.assertEqual(result['completedCount'],1)
+        self.assertFalse(list((self.parent/'inner-guard').rglob('*.html')))
+
+    def test_repeatable_visual_factory_does_not_retain_public_objects(self):
+        import gc,weakref
+        class Public(dict):pass
+        refs=[];calls=0
+        def items():
+            nonlocal calls
+            calls+=1
+            for i in range(3):
+                gc.collect();self.assertTrue(all(r() is None for r in refs))
+                public=Public(platform='yuntu',materialId=str(i),materialName='素材',cv={'status':'pending','shots':[]})
+                refs.append(weakref.ref(public));yield public,None;del public
+        stats=visual.write_visual(self.parent/'factory.html',items)
+        self.assertEqual(calls,2);self.assertEqual(stats['embeddedFrames'],0)
+        self.assertEqual((self.parent/'factory.html').read_text().count('class="material-panel"'),3)
+
+    def test_batch_frozen_snapshot_hash_rejects_self_consistent_tamper(self):
+        self.helper.acquire();import cv_probe
+        cv_probe.probe_cv(self.helper.root,attempt_id='frozen',_defer_report=True)
+        output=self.parent/'frozen-output';output.mkdir();frozen=visual.snapshot_report(self.helper.root,output/'snapshots/item-1',expected_attempt='frozen')
+        entry={'index':1,'runDir':str(self.helper.root),'cvStatus':'succeeded','attemptId':'frozen',**frozen}
+        core.write(output/'batch.json',{'acquisition':'reused_A_only','entries':[entry],'status':'succeeded'})
+        snapshot_root=Path(frozen['reportSnapshot']);public=core.read(snapshot_root/'report/report.json');public['materialName']='tampered'
+        core.write(snapshot_root/'report/report.json',public);core.write(snapshot_root/'report/receipt.json',{'artifacts':[core.artifact(snapshot_root/'report/report.json',snapshot_root)]})
+        with self.assertRaises(core.ProbeError) as error:visual.export_batch_html(output,self.parent/'tampered.html')
+        self.assertEqual(error.exception.code,'report_snapshot_changed');self.assertFalse((self.parent/'tampered.html').exists())
+
+    def test_partial_repeated_A_snapshots_never_reuse_prior_success_for_pending(self):
+        self.helper.acquire();import cv_probe
+        original=cv_probe.probe_cv;calls=0;manifest=self.parent/'partial-repeated.json'
+        core.write(manifest,{'schemaVersion':1,'runs':[{'runDir':str(self.helper.root)}]*3})
+        def fail_second(root,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==2:raise core.ProbeError('synthetic_cv_failure')
+            return original(root,**kwargs)
+        with patch.object(cv_probe,'probe_cv',side_effect=fail_second):result=serial_probe.probe_batch(manifest,self.parent/'partial-repeated')
+        self.assertEqual(result['completedCount'],1);self.assertEqual([e['cvStatus'] for e in result['entries']],['succeeded','failed','pending'])
+        for entry,status in zip(result['entries'],['succeeded','failed','pending']):
+            public=core.read(Path(entry['reportSnapshot'])/'report/report.json')
+            self.assertEqual(public['cv']['status'],status);self.assertEqual(public['status'],status)
+            if status!='succeeded':self.assertEqual(public['cv']['shots'],[])
+        self.assertEqual(Path(result['report']['htmlPath']).read_text().count('class="material-panel"'),3)

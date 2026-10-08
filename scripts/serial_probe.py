@@ -3,7 +3,7 @@ from pathlib import Path
 import os
 import uuid
 from probe_core import ROOT, ProbeError, external_root, read, write, digest, resource_summary, safe_error
-from runtime_memory import StageMonitor
+from runtime_memory import StageMonitor, release_item, memory_stop_code
 
 
 def probe_batch(manifest_file, output, *, delivery_mode='html'):
@@ -28,7 +28,7 @@ def probe_batch(manifest_file, output, *, delivery_mode='html'):
     if any(output.is_relative_to(root) or root.is_relative_to(output) for root in roots):raise ProbeError('batch_output_overlap')
     output.mkdir(parents=True,exist_ok=False)
     batch_id='serial-'+uuid.uuid4().hex[:12]
-    entries=[{'index':i,'runDir':str(root),'attemptId':batch_id+'-'+str(i),'status':'pending'} for i,root in enumerate(roots,1)]
+    entries=[{'index':i,'runDir':str(root),'attemptId':batch_id+'-'+str(i),'status':'pending','cvStatus':'pending'} for i,root in enumerate(roots,1)]
     result={'schemaVersion':1,'packageVersion':read(ROOT/'config/platform.json')['version'],
             'platform':read(ROOT/'config/platform.json')['platform'],'batchId':batch_id,'status':'running','stage':'cv_precheck','pid':os.getpid(),
             'manifestSha256':digest(manifest_file),'concurrency':1,'acquisition':'reused_A_only',
@@ -39,44 +39,55 @@ def probe_batch(manifest_file, output, *, delivery_mode='html'):
         from cv_probe import probe_cv, verify_cv,process_identity
         result['processStartTicks']=process_identity(result['pid']);write(output/'batch.json',result)
         from delivery import export_report
+        from visual_report import snapshot_report, snapshot_pending_entries, export_batch_html
         with monitor:
             for entry,root in zip(entries,roots):
                 monitor.checkpoint('batch_cv_'+str(entry['index']))
                 result['stage']='cv';entry.update(status='running',cvStatus='running');write(output/'batch.json',result)
-                probe_cv(root,attempt_id=entry['attemptId'],backend='ffmpeg-scene')
+                probe_cv(root,attempt_id=entry['attemptId'],backend='ffmpeg-scene',_defer_report=True)
                 receipt=read(root/'cv'/entry['attemptId']/'receipt.json')
                 entry.update(cvStatus=receipt['status'],inputVideoSha256=receipt['inputVideoSha256'],
-                             workerExitCode=receipt['workerExitCode'],processCleanup=receipt['processCleanup'])
+                             workerExitCode=receipt['workerExitCode'],processCleanup=receipt['processCleanup'],
+                             memoryGuardReason=receipt.get('memoryGuard',{}).get('reason'))
                 if receipt['status']!='succeeded':raise ProbeError(receipt.get('errorCode') or 'batch_cv_failed')
                 if receipt['processCleanup']['status']!='completed':raise ProbeError('process_cleanup_unconfirmed')
                 verify_cv(root,entry['attemptId'])
-                monitor.checkpoint('batch_export_'+str(entry['index']))
-                if delivery_mode=='audit':
-                    result['stage']='delivery';write(output/'batch.json',result)
-                    entry['export']=export_report(root,output/('item-'+str(entry['index'])),expected_attempt=entry['attemptId'])
-                else:
-                    # Keep a small immutable snapshot; repeated A inputs can have distinct attempts.
-                    from probe_core import artifact
-                    snapshot=output/'snapshots'/('item-'+str(entry['index']))
-                    write(snapshot/'report/report.json',read(root/'report/report.json'))
-                    write(snapshot/'report/receipt.json',{'artifacts':[artifact(snapshot/'report/report.json',snapshot)]})
-                    entry['reportSnapshot']=str(snapshot)
+                entry['status']='succeeded';result['completedCount']+=1
+                entry.update(snapshot_report(root,output/'snapshots'/('item-'+str(entry['index'])),expected_attempt=entry['attemptId']))
                 entry['memoryObservation']=resource_summary(root/'cv'/entry['attemptId'])
-                entry['status']='succeeded';result['completedCount']+=1;write(output/'batch.json',result)
+                write(output/'batch.json',result)
+                release_item(root,'batch_item_complete',attempt_id=entry['attemptId'],report_root=entry['reportSnapshot'])
                 monitor.checkpoint('batch_item_complete_'+str(entry['index']))
+            result.update(status='succeeded',stage='delivery');write(output/'batch.json',result)
             if delivery_mode=='html':
-                from visual_report import export_batch_html
-                result.update(status='succeeded',stage='delivery');write(output/'batch.json',result)
                 result['report']=export_batch_html(output,output/'index.html')
+            else:
+                # Audit assembly starts only after the full CV queue is complete.
+                for entry,root in zip(entries,roots):
+                    monitor.checkpoint('batch_export_'+str(entry['index']))
+                    entry['export']=export_report(root,output/('item-'+str(entry['index'])),expected_attempt=entry['attemptId'],_report_snapshot=entry)
+                    write(output/'batch.json',result)
         monitor.check()
         result.update(status='succeeded',stage='complete')
     except Exception as exc:
         result.update(status='failed',errorCode=getattr(exc,'code','batch_failed'),message=safe_error(exc))
         for entry in entries:
-            if entry['status']=='running':entry.update(status='failed',errorCode=result['errorCode'])
+            if entry['status']=='running':entry.update(status='failed',cvStatus='failed',errorCode=result['errorCode'])
+        if memory_stop_code(result['errorCode']):
+            failed=next((e for e in entries if e.get('cvStatus')=='failed' and e.get('memoryGuardReason')), {})
+            result['memoryStopReason']=failed.get('memoryGuardReason') or result['errorCode']
+            result['memoryStopOrigin']='cv_attempt' if result['stage']=='cv' else 'phase_admission'
+            result['automaticReportSkippedReason']='process_cleanup_unconfirmed' if result['errorCode']=='process_cleanup_unconfirmed' else 'memory_guard_stopped'
+        if monitor.failure is None and not memory_stop_code(result['errorCode']) and delivery_mode=='html':
+            try:
+                snapshot_pending_entries(output,entries);write(output/'batch.json',result)
+                result['report']=export_batch_html(output,output/'index.html')
+            except Exception as report_exc:result['reportErrorCode']=getattr(report_exc,'code','report_failed')
     finally:
         result['distinctVideoCount']=len({e['inputVideoSha256'] for e in entries if e.get('inputVideoSha256')})
-        result['guardStopReason']=monitor.failure
+        result['guardStopReason']=monitor.failure or result.get('memoryStopReason')
+        if monitor.failure:result['guardStopOrigin']='queue_monitor'
+        elif result.get('memoryStopOrigin'):result['guardStopOrigin']=result['memoryStopOrigin']
         result['memoryObservation']=resource_summary(output)
         result['acceptanceNote']='Repeated identical video hashes prove repetition only; diverse-video batch and manual quality require separate evidence.'
         write(output/'status.json',{'status':result['status'],'stage':'batch_complete'})

@@ -1,6 +1,8 @@
 """Per-run phase admission and best-effort release of completed owned files.
 These are Skill policies; no sandbox limits or global caches are changed.
 """
+import gc
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -58,7 +60,7 @@ def release_owned(log_root, stage, owner_root, paths):
     result={'stage':stage,'policyOrigin':'skill','supported':hasattr(os,'posix_fadvise') and hasattr(os,'POSIX_FADV_DONTNEED'),
             'attemptedFiles':0,'advisedBytes':0,'errors':[], 'before':before,
             'effect':'advisory_only_not_guaranteed_reclaim'}
-    if result['supported']:
+    if result['supported'] and not owner.is_symlink():
         for original in dict.fromkeys(Path(p).absolute() for p in paths):
             if not original.is_relative_to(owner):continue
             relative=original.relative_to(owner)
@@ -82,6 +84,99 @@ def release_owned(log_root, stage, owner_root, paths):
     result['after']=cgroup_snapshot()
     append_event(log_root,'cache-advice.ndjson',result)
     return result
+
+
+def digest_owned(path, *, owner_root, log_root, stage, chunk_bytes=1024*1024):
+    """Complete SHA-256 with bounded, advisory release of this explicit input.
+    Do not use this for executables/dependencies. DONTNEED is not a reclaim guarantee.
+    """
+    from probe_core import ProbeError, cgroup_snapshot
+    owner=Path(owner_root).absolute();original=Path(path).absolute()
+    if owner.is_symlink():raise ProbeError('unsafe_artifact_path')
+    root=owner.resolve()
+    if not original.is_relative_to(owner):raise ProbeError('unsafe_artifact_path')
+    relative=original.relative_to(owner)
+    if '..' in relative.parts or any((root/Path(*relative.parts[:i])).is_symlink() for i in range(1,len(relative.parts)+1)):
+        raise ProbeError('unsafe_artifact_path')
+    page=os.sysconf('SC_PAGESIZE') if hasattr(os,'sysconf') else 4096
+    if not isinstance(chunk_bytes,int) or isinstance(chunk_bytes,bool) or chunk_bytes<page or chunk_bytes%page:
+        raise ProbeError('cache_hash_chunk_invalid')
+    target=root/relative;before=cgroup_snapshot()
+    result={'stage':stage,'policyOrigin':'skill','operation':'owned_input_sha256','path':relative.as_posix(),
+            'supported':hasattr(os,'posix_fadvise') and hasattr(os,'POSIX_FADV_DONTNEED'),
+            'attemptedFiles':1,'advisedBytes':0,'hashedBytes':0,'errors':[],'before':before,
+            'effect':'advisory_only_not_guaranteed_reclaim'}
+    fd=None;sha=hashlib.sha256();error=None
+    def advise(offset,length):
+        try:os.posix_fadvise(fd,offset,length,os.POSIX_FADV_DONTNEED)
+        except OSError as exc:
+            if not result['errors']:result['errors'].append({'path':relative.as_posix(),'errno':exc.errno})
+            return False
+        return True
+    try:
+        if not stat.S_ISREG(target.lstat().st_mode):raise ProbeError('artifact_missing')
+        fd=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        initial=os.fstat(fd)
+        result['initialFileStat']={'device':initial.st_dev,'inode':initial.st_ino,'sizeBytes':initial.st_size,'modifiedNs':initial.st_mtime_ns}
+        if not stat.S_ISREG(initial.st_mode):raise ProbeError('artifact_missing')
+        can_advise=result['supported']
+        if can_advise:
+            try:os.fsync(fd)
+            except OSError as exc:
+                result['errors'].append({'path':relative.as_posix(),'errno':exc.errno});can_advise=False
+        while True:
+            chunk=os.read(fd,chunk_bytes)
+            if not chunk:break
+            sha.update(chunk);result['hashedBytes']+=len(chunk)
+            # Only complete pages during the stream; EOF advice includes the tail.
+            end=result['hashedBytes']//page*page;offset=result['advisedBytes'];length=end-offset
+            if can_advise and length:
+                if advise(offset,length):result['advisedBytes']+=length
+                else:can_advise=False
+            del chunk
+        final=os.fstat(fd)
+        result['finalFileStat']={'device':final.st_dev,'inode':final.st_ino,'sizeBytes':final.st_size,'modifiedNs':final.st_mtime_ns}
+        path_stat=target.lstat()
+        identity=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
+        if identity(initial)!=identity(final) or identity(initial)!=identity(path_stat) or result['hashedBytes']!=initial.st_size:
+            raise ProbeError('artifact_changed')
+        if can_advise and advise(0,0):result['advisedBytes']=result['hashedBytes']
+        result['sha256']=sha.hexdigest()
+    except Exception as exc:
+        error=exc;result['errorCode']=getattr(exc,'code','owned_hash_failed')
+    finally:
+        if fd is not None:os.close(fd)
+        result['after']=cgroup_snapshot();append_event(log_root,'cache-advice.ndjson',result)
+    if error:raise error
+    return result['sha256']
+
+
+def release_item(root, stage, *, attempt_id=None, report_root=None):
+    """Release explicit completed A/attempt/snapshot files and collect Python garbage.
+    The receipt provides the attempt file set, so no prior attempt is scanned.
+    """
+    from probe_core import read, cgroup_snapshot
+    root=Path(root);events=[release_completed(root,stage+'_inputs')]
+    if attempt_id:
+        folder=root/'cv'/attempt_id;receipt=folder/'receipt.json'
+        if receipt.is_file():
+            data=read(receipt)
+            if data.get('processCleanup',{}).get('status')=='completed':
+                paths=[folder/item['path'] for item in data.get('artifacts',[])]+[receipt]
+                events.append(release_owned(root,stage+'_attempt',folder,paths))
+            else:
+                append_event(root,'cache-advice.ndjson',{'stage':stage+'_attempt','operation':'attempt_release_skipped','reason':'process_cleanup_unconfirmed'})
+    if report_root:
+        snapshot=Path(report_root)
+        events.append(release_owned(root,stage+'_snapshot',snapshot,[snapshot/'report/report.json',snapshot/'report/receipt.json']))
+    before=cgroup_snapshot();collected=gc.collect()
+    result={'stage':stage+'_python_gc','operation':'gc_collect','collectedObjects':collected,'before':before,
+            'after':cgroup_snapshot(),'effect':'advisory_only_not_guaranteed_reclaim'}
+    append_event(root,'cache-advice.ndjson',result);return {'files':events,'pythonGc':result}
+
+
+def memory_stop_code(code):
+    return code in {'memory_guard_aborted','insufficient_headroom','insufficient_stage_headroom','operation_memory_guard_aborted','memory_monitor_failed','process_cleanup_unconfirmed'}
 
 
 class StageMonitor:

@@ -29,7 +29,12 @@ class SerialExportTests(unittest.TestCase):
         core.write(path,{'schemaVersion':1,'runs':[{'runDir':str(self.root)} for _ in range(count)]})
         return path
     def test_serial_actual_workers_and_exports_have_complete_independent_evidence(self):
-        with patch.object(core.Gateway,'post',side_effect=AssertionError('batch must not acquire')):
+        original_export=delivery.export_report
+        def late_export(root,target,**kwargs):
+            saved=core.read(self.parent/'batch/batch.json');self.assertEqual(saved['completedCount'],2)
+            self.assertEqual(saved['stage'],'delivery');self.assertIn('_report_snapshot',kwargs)
+            return original_export(root,target,**kwargs)
+        with patch.object(core.Gateway,'post',side_effect=AssertionError('batch must not acquire')),patch.object(delivery,'export_report',side_effect=late_export):
             result=serial_probe.probe_batch(self.manifest(),self.parent/'batch',delivery_mode='audit')
         self.assertEqual(result['status'],'succeeded');self.assertEqual(result['completedCount'],2)
         self.assertEqual(result['distinctVideoCount'],1)
@@ -96,3 +101,11 @@ class SerialExportTests(unittest.TestCase):
             observed=memory.release_owned(self.parent,'export_test',self.parent,[target,link,directory/'frame.jpg'])
         self.assertEqual(advise.call_count,2);self.assertEqual(observed['advisedBytes'],11)
         self.assertEqual(target.read_bytes(),b'archive');self.assertEqual(untouched.read_bytes(),b'private')
+
+    def test_serial_attempt_admission_stop_does_not_render_partial_report(self):
+        def stop(root,attempt_id,**kwargs):
+            core.write(Path(root)/'cv'/attempt_id/'receipt.json',{'status':'failed','errorCode':'insufficient_headroom','inputVideoSha256':'hash','workerExitCode':None,'processCleanup':{'status':'not_started'},'memoryGuard':{'reason':'insufficient_stage_headroom'}})
+        with patch('cv_probe.probe_cv',side_effect=stop),patch('visual_report.export_batch_html') as export,patch('visual_report.snapshot_pending_entries') as snapshots:
+            result=serial_probe.probe_batch(self.manifest(),self.parent/'serial-guard')
+        export.assert_not_called();snapshots.assert_not_called();self.assertEqual(result['guardStopReason'],'insufficient_stage_headroom')
+        self.assertEqual(result['guardStopOrigin'],'cv_attempt');self.assertEqual(result['entries'][1]['cvStatus'],'pending')

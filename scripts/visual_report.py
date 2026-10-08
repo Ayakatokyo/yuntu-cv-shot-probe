@@ -1,4 +1,5 @@
 """Self-contained visual delivery. No video copies, ZIPs, or remote dependencies."""
+from contextlib import contextmanager
 import base64
 import html
 import os
@@ -33,64 +34,85 @@ const search=document.querySelector('.search');search.addEventListener('input',(
 '''
 
 
+@contextmanager
+def _items_scope(factory):
+    iterator=iter(factory())
+    try:yield iterator
+    finally:
+        close=getattr(iterator,'close',None)
+        if close:close()
+
+
 def write_visual(target, items, summary=None, monitor=None):
     """Stream sections + each bounded JPEG. items=(public report, CV frame root)."""
     summary=summary or {};budget=IMAGE_BUDGET;embedded=omitted=0
+    if not callable(items) and iter(items) is items:raise ProbeError('report_factory_required')
+    factory=items if callable(items) else lambda:iter(items)
+    navigation=[];platforms=set();completed=shot_count=0
+    # First pass keeps only navigation/count fields, never complete report objects.
+    with _items_scope(factory) as stream:
+        for public,_ in stream:
+            cv=public.get('cv',{});shots=cv.get('shots') or []
+            navigation.append({'name':public.get('materialName') or ('素材 '+str(public.get('materialId') or len(navigation)+1)),
+                               'materialId':public.get('materialId'),'status':cv.get('status'),'shotCount':len(shots)})
+            platforms.add(public.get('platform'));completed+=cv.get('status')=='succeeded';shot_count+=len(shots)
+            del public,cv,shots
+    requested=summary.get('requestedCount',len(navigation))
     def check():
         if monitor:monitor.check()
     with Path(target).open('w',encoding='utf-8') as out:
         def emit(value):check();out.write(value)
-        platforms={p.get('platform') for p,_ in items}
         title='双平台' if len(platforms)>1 else ('千川' if 'qianchuan' in platforms else '云图')
-        completed=sum(p.get('cv',{}).get('status')=='succeeded' for p,_ in items)
-        shot_count=sum(len(p.get('cv',{}).get('shots',[])) for p,_ in items)
-        requested=summary.get('requestedCount',len(items))
         emit('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>'+title+'视频分镜工作台</title><style>'+CSS+'</style></head><body>')
         emit('<header><p class="brand">'+title+' · 素材工作台</p><h1>视频分镜 · 从素材到每个镜头</h1><p class="intro muted">查看代表帧、比较镜头节奏，定位值得复盘的画面。点击时间轴或镜头缩略图，切换大图。</p><div class="counts">')
         for value,text in ((requested,'请求素材'),(completed,'完成分镜'),(shot_count,'镜头总数')):emit('<div class="count"><strong>'+str(value)+'</strong><span>'+text+'</span></div>')
         emit('</div></header><noscript><p class="no-js">浏览器未启用脚本。以下仍可阅读全部镜头与代表帧；素材切换和筛选需要启用 JavaScript。</p></noscript><div class="layout"><aside><h3>素材列表</h3><input class="search" type="search" aria-label="搜索素材名称或ID" placeholder="搜索名称或素材ID"><nav class="material-nav" aria-label="素材选择">')
-        for i,(public,_) in enumerate(items):
-            cv=public.get('cv',{});name=public.get('materialName') or ('素材 '+str(public.get('materialId') or i+1))
-            emit('<button data-material="material-'+str(i)+'" aria-pressed="false">'+esc(name)+'<small>'+esc(public.get('materialId'))+' · '+esc(label(cv.get('status')))+' · '+str(len(cv.get('shots',[])))+' 镜头</small></button>')
+        for i,nav in enumerate(navigation):
+            emit('<button data-material="material-'+str(i)+'" aria-pressed="false">'+esc(nav['name'])+'<small>'+esc(nav['materialId'])+' · '+esc(label(nav['status']))+' · '+str(nav['shotCount'])+' 镜头</small></button>')
         emit('</nav><p class="empty-search" hidden>没有匹配的素材，请调整关键词。</p><p class="note">单次最多 10 条 · 串行处理<br>CV 结果为算法候选，镜头质量需人工核对。</p></aside><main>')
         if summary.get('status') in ('failed','partial'):
             emit('<p class="alert">本次'+esc(label(summary['status']))+'。已完成 '+str(summary.get('completedCount',completed))+' / '+str(requested)+' 条；未执行或失败结果不会计为完成。'+esc(summary.get('errorCode') or '筛选后素材不足，未自动补位')+'</p>')
-        if not items:emit('<p class="alert">尚无可展示的分镜结果。请查看运行目录中的 batch.json 与阶段诊断，修正后再明确发起新运行。</p>')
-        for i,(public,frame_root) in enumerate(items):
-            cv=public.get('cv',{});shots=cv.get('shots') or [];media=public.get('media') or {};name=public.get('materialName') or ('素材 '+str(public.get('materialId') or i+1))
-            emit('<section class="material-panel" id="material-'+str(i)+'" tabindex="0"><div class="material-heading"><div><h2>'+esc(name)+'</h2><span class="caption">素材ID '+esc(public.get('materialId'))+'</span></div><span class="badge">'+esc(label(cv.get('status')))+'</span></div><div class="meta">')
-            for text in (str(len(shots))+' 个镜头',seconds(cv.get('durationSec') or media.get('durationSec'))+' 秒',str(media.get('width','?'))+' × '+str(media.get('height','?')),str(media.get('fps','?'))+' fps',public.get('periodLabel') or '日期范围未记录'):emit('<span>'+esc(text)+'</span>')
-            emit('</div>')
-            if shots:
-                emit('<div class="viewer"><div class="stage"><p class="empty-frame">选择镜头查看大图</p></div><div class="shot-detail"><div class="shot-number" aria-live="polite">镜头 01</div><div class="time-value"></div><p class="duration muted"></p><div class="controls"><button data-prev aria-label="上一个镜头">← 上一镜头</button><button data-next aria-label="下一个镜头">下一镜头 →</button></div><p class="note">这是镜头内的代表帧。时间区间来自 CV 检测，代表帧不等同于完整画面内容；未进行转写或 AI 内容判断。</p><p class="note">键盘 ← / → 可切换镜头。完整视频保留在原运行目录，HTML 中仅内嵌代表帧。</p></div></div><h3>镜头节奏</h3><div class="timeline" aria-label="镜头时间轴">')
-                for n,shot in enumerate(shots):
-                    duration=float(shot['endSec'])-float(shot['startSec'])
-                    emit('<button data-shot="'+str(n)+'" style="flex-grow:'+str(max(duration,.001))+'" aria-label="镜头 '+str(n+1)+'，'+seconds(shot['startSec'])+' 至 '+seconds(shot['endSec'])+' 秒" aria-pressed="false" title="镜头 '+str(n+1)+' · '+seconds(duration)+'秒"></button>')
-                emit('</div><div class="scale"><span>0.00 秒</span><span>'+seconds(shots[-1]['endSec'])+' 秒</span></div><div class="section-bar"><h3>镜头画廊 <small class="visible-count muted">显示 '+str(len(shots))+' / '+str(len(shots))+' 镜头</small></h3><label>时长 <select class="duration-filter" aria-label="按镜头时长筛选"><option value="0">全部镜头</option><option value="1">至少 1 秒</option><option value="3">至少 3 秒</option><option value="5">至少 5 秒</option></select></label></div><div class="filmstrip">')
-                for n,shot in enumerate(shots):
-                    duration=float(shot['endSec'])-float(shot['startSec'])
-                    emit('<button class="shot" data-shot="'+str(n)+'" data-start="'+seconds(shot['startSec'])+'" data-end="'+seconds(shot['endSec'])+'" data-duration="'+str(duration)+'" data-representative="'+seconds(shot['representativeTimeSec'])+'" aria-pressed="false"><span class="shot-image">')
-                    reason=None;frame=None
-                    if shot.get('representativeStatus')!='available':reason='代表帧未生成'
-                    elif frame_root is None:reason='代表帧资源未提供'
-                    else:
-                        frame=safe_file(frame_root,shot['frameRef']);size=frame.stat().st_size
-                        if size>IMAGE_LIMIT:reason='代表帧超过轻量报告单帧限制'
-                        elif size>budget:reason='已达到轻量报告图片容量上限'
-                    if reason:omitted+=1;emit('<span class="missing">'+reason+'</span>')
-                    else:
-                        check();raw=frame.read_bytes()
-                        if not raw.startswith(b'\xff\xd8\xff'):raise ProbeError('report_frame_not_jpeg')
-                        budget-=len(raw);embedded+=1
-                        emit('<img loading="lazy" alt="镜头 '+str(n+1)+' 代表帧，'+seconds(shot['representativeTimeSec'])+' 秒" src="data:image/jpeg;base64,'+base64.b64encode(raw).decode('ascii')+'">')
-                    emit('</span><span class="text">镜头 '+str(n+1).zfill(2)+'<small>'+seconds(shot['startSec'])+' – '+seconds(shot['endSec'])+' 秒 · '+seconds(duration)+'s</small></span></button>')
+        if not navigation:emit('<p class="alert">尚无可展示的分镜结果。请查看运行目录中的 batch.json 与阶段诊断，修正后再明确发起新运行。</p>')
+        with _items_scope(factory) as stream:
+            i=-1
+            for public,frame_root in stream:
+                i+=1
+                cv=public.get('cv',{});shots=cv.get('shots') or [];media=public.get('media') or {};name=public.get('materialName') or ('素材 '+str(public.get('materialId') or i+1))
+                emit('<section class="material-panel" id="material-'+str(i)+'" tabindex="0"><div class="material-heading"><div><h2>'+esc(name)+'</h2><span class="caption">素材ID '+esc(public.get('materialId'))+'</span></div><span class="badge">'+esc(label(cv.get('status')))+'</span></div><div class="meta">')
+                for text in (str(len(shots))+' 个镜头',seconds(cv.get('durationSec') or media.get('durationSec'))+' 秒',str(media.get('width','?'))+' × '+str(media.get('height','?')),str(media.get('fps','?'))+' fps',public.get('periodLabel') or '日期范围未记录'):emit('<span>'+esc(text)+'</span>')
                 emit('</div>')
-            else:emit('<p class="alert">'+esc(public.get('errorMessage') or public.get('errorCode') or '该素材尚未完成 CV 分镜，不能据此判断镜头质量。')+'</p>')
-            obs=cv.get('memoryObservation') or public.get('memoryObservation') or {}
-            emit('<details class="technical"><summary>查看执行与来源摘要</summary><dl>')
-            for key,val in (('执行版本',cv.get('packageVersion') or (public.get('runtime') or {}).get('packageVersion')),('CV attempt',cv.get('attemptId')),('视频 SHA-256',(public.get('videoArtifact') or {}).get('sha256')),('worker 退出码',cv.get('exitCode')),('进程清理',(cv.get('processCleanup') or {}).get('status')),('观测采样数',obs.get('sampleCount')),('原始占用峰值 MiB',round((obs.get('peaks') or {})['rawUsageBytes']/1048576,2) if 'rawUsageBytes' in (obs.get('peaks') or {}) else None),('人工质量验收','待人工核对'),('内容分析','未进行 ASR / 模型分析')):
-                emit('<dt>'+esc(key)+'</dt><dd>'+esc(val)+'</dd>')
-            emit('</dl><p class="note">完整采样与诊断保留在原运行目录。采样可能漏掉瞬时峰值，资源完成与人工质量分别验收。</p></details></section>')
+                if shots:
+                    emit('<div class="viewer"><div class="stage"><p class="empty-frame">选择镜头查看大图</p></div><div class="shot-detail"><div class="shot-number" aria-live="polite">镜头 01</div><div class="time-value"></div><p class="duration muted"></p><div class="controls"><button data-prev aria-label="上一个镜头">← 上一镜头</button><button data-next aria-label="下一个镜头">下一镜头 →</button></div><p class="note">这是镜头内的代表帧。时间区间来自 CV 检测，代表帧不等同于完整画面内容；未进行转写或 AI 内容判断。</p><p class="note">键盘 ← / → 可切换镜头。完整视频保留在原运行目录，HTML 中仅内嵌代表帧。</p></div></div><h3>镜头节奏</h3><div class="timeline" aria-label="镜头时间轴">')
+                    for n,shot in enumerate(shots):
+                        duration=float(shot['endSec'])-float(shot['startSec'])
+                        emit('<button data-shot="'+str(n)+'" style="flex-grow:'+str(max(duration,.001))+'" aria-label="镜头 '+str(n+1)+'，'+seconds(shot['startSec'])+' 至 '+seconds(shot['endSec'])+' 秒" aria-pressed="false" title="镜头 '+str(n+1)+' · '+seconds(duration)+'秒"></button>')
+                    emit('</div><div class="scale"><span>0.00 秒</span><span>'+seconds(shots[-1]['endSec'])+' 秒</span></div><div class="section-bar"><h3>镜头画廊 <small class="visible-count muted">显示 '+str(len(shots))+' / '+str(len(shots))+' 镜头</small></h3><label>时长 <select class="duration-filter" aria-label="按镜头时长筛选"><option value="0">全部镜头</option><option value="1">至少 1 秒</option><option value="3">至少 3 秒</option><option value="5">至少 5 秒</option></select></label></div><div class="filmstrip">')
+                    for n,shot in enumerate(shots):
+                        duration=float(shot['endSec'])-float(shot['startSec'])
+                        emit('<button class="shot" data-shot="'+str(n)+'" data-start="'+seconds(shot['startSec'])+'" data-end="'+seconds(shot['endSec'])+'" data-duration="'+str(duration)+'" data-representative="'+seconds(shot['representativeTimeSec'])+'" aria-pressed="false"><span class="shot-image">')
+                        reason=None;frame=None
+                        if shot.get('representativeStatus')!='available':reason='代表帧未生成'
+                        elif frame_root is None:reason='代表帧资源未提供'
+                        else:
+                            frame=safe_file(frame_root,shot['frameRef']);size=frame.stat().st_size
+                            if size>IMAGE_LIMIT:reason='代表帧超过轻量报告单帧限制'
+                            elif size>budget:reason='已达到轻量报告图片容量上限'
+                        if reason:omitted+=1;emit('<span class="missing">'+reason+'</span>')
+                        else:
+                            check();raw=frame.read_bytes()
+                            if not raw.startswith(b'\xff\xd8\xff'):raise ProbeError('report_frame_not_jpeg')
+                            budget-=len(raw);embedded+=1
+                            emit('<img loading="lazy" alt="镜头 '+str(n+1)+' 代表帧，'+seconds(shot['representativeTimeSec'])+' 秒" src="data:image/jpeg;base64,'+base64.b64encode(raw).decode('ascii')+'">')
+                            del raw
+                        emit('</span><span class="text">镜头 '+str(n+1).zfill(2)+'<small>'+seconds(shot['startSec'])+' – '+seconds(shot['endSec'])+' 秒 · '+seconds(duration)+'s</small></span></button>')
+                    emit('</div>')
+                else:emit('<p class="alert">'+esc(public.get('errorMessage') or public.get('errorCode') or '该素材尚未完成 CV 分镜，不能据此判断镜头质量。')+'</p>')
+                obs=cv.get('memoryObservation') or public.get('memoryObservation') or {}
+                emit('<details class="technical"><summary>查看执行与来源摘要</summary><dl>')
+                for key,val in (('执行版本',cv.get('packageVersion') or (public.get('runtime') or {}).get('packageVersion')),('CV attempt',cv.get('attemptId')),('视频 SHA-256',(public.get('videoArtifact') or {}).get('sha256')),('worker 退出码',cv.get('exitCode')),('进程清理',(cv.get('processCleanup') or {}).get('status')),('观测采样数',obs.get('sampleCount')),('原始占用峰值 MiB',round((obs.get('peaks') or {})['rawUsageBytes']/1048576,2) if 'rawUsageBytes' in (obs.get('peaks') or {}) else None),('人工质量验收','待人工核对'),('内容分析','未进行 ASR / 模型分析')):
+                    emit('<dt>'+esc(key)+'</dt><dd>'+esc(val)+'</dd>')
+                emit('</dl><p class="note">完整采样与诊断保留在原运行目录。采样可能漏掉瞬时峰值，资源完成与人工质量分别验收。</p></details></section>')
+                del public,cv,shots,media,obs
         emit('</main></div><footer>轻量交付 · 内嵌 '+str(embedded)+' 张代表帧'+(' · '+str(omitted)+' 张未嵌入（见对应占位原因）' if omitted else '')+' · 图片预算 12 MiB / 单帧 256 KiB<br>本文件可离线打开。源视频、CSV、账号、签名 URL 与逐条资源日志留在原运行目录；需审计时可显式导出技术包。</footer><script>'+JS+'</script></body></html>')
         out.flush();os.fsync(out.fileno())
     return {'embeddedFrames':embedded,'omittedFrames':omitted,'containsVideo':False,'selfContained':True}
@@ -114,6 +136,61 @@ def load_public(root, expected_attempt=None, artifact_root=None):
         if refs.get(relative)!=artifact(safe_file(folder,relative),folder):raise ProbeError('cv_artifact_changed')
     if read(folder/'shots.json')['shots']!=cv.get('shots'):raise ProbeError('report_snapshot_changed')
     return public,folder
+
+
+def snapshot_report(root, target, *, expected_attempt=None, entry=None):
+    """Persist one small immutable report bound to its completed attempt; no HTML."""
+    from probe_core import report
+    root=Path(root);target=Path(target)
+    if target.exists():raise ProbeError('report_snapshot_exists')
+    with run_lock(root):
+        report(root,render_html=False)
+        public=read(root/'report/report.json')
+        if expected_attempt is not None and public.get('cv',{}).get('attemptId')!=expected_attempt:
+            raise ProbeError('delivery_cv_attempt_changed')
+        if entry and entry.get('cvStatus') in ('pending','failed'):
+            cv=public.get('cv',{})
+            if entry['cvStatus']=='pending' or cv.get('attemptId')!=entry.get('attemptId'):
+                public['cv']={'status':entry['cvStatus'],'attemptId':entry.get('attemptId'),'errorCode':entry.get('errorCode'),'shots':[]}
+                public['cvStatus']=entry['cvStatus'];public['status']=entry['cvStatus'];public['stage']='B_cv'
+                public['errorCode']=entry.get('errorCode');public['errorMessage']=None
+                if entry.get('errorCode'):public['errorCode']=entry['errorCode']
+        write(target/'report/report.json',public)
+        ref=artifact(target/'report/report.json',target)
+        write(target/'report/receipt.json',{'artifacts':[ref]})
+        return {'reportSnapshot':str(target),'reportSnapshotSha256':ref['sha256']}
+
+
+def snapshot_pending_entries(output, entries):
+    """At the terminal queue boundary, describe failures/pending inputs once."""
+    for entry in entries:
+        if entry.get('reportSnapshot') or not entry.get('runDir'):continue
+        root=Path(entry['runDir'])
+        if not (root/'status.json').exists():continue
+        target=Path(output)/'snapshots'/('item-'+str(entry['index']))
+        entry.update(snapshot_report(root,target,entry=entry))
+
+
+def public_items(entries, observation_root, *, batch_root=None):
+    """Repeatable iterator; verify and release a single public report at a time."""
+    for entry in entries:
+        if not entry.get('runDir'):continue
+        run=Path(entry['runDir']);snapshot=Path(entry.get('reportSnapshot') or run)
+        if batch_root and not run.resolve().is_relative_to(Path(batch_root).resolve()):raise ProbeError('batch_output_overlap')
+        if entry.get('reportSnapshot') and not snapshot.resolve().is_relative_to(Path(observation_root).resolve()):raise ProbeError('batch_output_overlap')
+        if not (snapshot/'report/report.json').exists():continue
+        if entry.get('reportSnapshotSha256') and digest(safe_file(snapshot,'report/report.json'))!=entry['reportSnapshotSha256']:raise ProbeError('report_snapshot_changed')
+        public=None;folder=None
+        try:
+            with run_lock(run):
+                public,folder=load_public(snapshot,entry.get('attemptId') if entry.get('cvStatus')=='succeeded' else None,run)
+                yield public,folder
+        finally:
+            # Completed reads are scoped to snapshot and this attempt's frames.
+            release_owned(observation_root,'html_snapshot_read',snapshot,[snapshot/'report/report.json',snapshot/'report/receipt.json'])
+            if folder is not None and public is not None:
+                release_owned(observation_root,'html_frames_read',folder,[folder/'shots.json',folder/'receipt.json']+[folder/s['frameRef'] for s in public.get('cv',{}).get('shots',[])])
+            del public,folder
 
 
 def _export(items_factory,destination,observation_root):
@@ -150,19 +227,22 @@ def export_html(root,destination,*,expected_attempt=None):
     if destination.resolve().is_relative_to(root.resolve()):raise ProbeError('delivery_output_overlap')
     with run_lock(root):
         release_completed(root,'html_export_precheck')
-        return _export(lambda:([load_public(root,expected_attempt)],{}),destination,root)
+        def items():
+            public,folder=load_public(root,expected_attempt)
+            try:yield public,folder
+            finally:
+                release_owned(root,'html_snapshot_read',root,[root/'report/report.json',root/'report/receipt.json'])
+                if folder is not None:
+                    release_owned(root,'html_frames_read',folder,[folder/'shots.json',folder/'receipt.json']+[folder/s['frameRef'] for s in public.get('cv',{}).get('shots',[])])
+                del public,folder
+        return _export(lambda:(items,{}),destination,root)
 
 
 def export_batch_html(root,destination):
     root=Path(root)
     def collect():
-        batch=read(root/'batch.json');items=[]
-        for entry in batch['entries']:
-            if not entry.get('runDir'):continue
-            run=Path(entry['runDir'])
-            if batch.get('acquisition')!='reused_A_only' and not run.resolve().is_relative_to(root.resolve()):raise ProbeError('batch_output_overlap')
-            if entry.get('reportSnapshot') and not Path(entry['reportSnapshot']).resolve().is_relative_to(root.resolve()):raise ProbeError('batch_output_overlap')
-            if (run/'report/report.json').exists():
-                with run_lock(run):items.append(load_public(Path(entry.get('reportSnapshot') or run),entry.get('attemptId') if entry.get('cvStatus')=='succeeded' else None,run))
+        batch=read(root/'batch.json')
+        def items():
+            yield from public_items(batch['entries'],root,batch_root=None if batch.get('acquisition')=='reused_A_only' else root)
         return items,batch
     return _export(collect,destination,root)
