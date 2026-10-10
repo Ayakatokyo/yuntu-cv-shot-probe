@@ -1,5 +1,9 @@
 # 0.5.5当前批量与轻量报告
 
+## 0.5.6产物目录契约（2026-10-08）
+
+新运行CLI（run-batch/probe-cv-batch/acquire）默认使用调用方当前工作对象目录下的 `云图素材分镜数据/run-<UTC时间>-<8位随机标识>/`。`--output-root` 为自动分运行的数据根目录，`--output-dir` 为精确新目录，两者互斥；拒绝技能目录/软链接与已存在的新运行目录。返回绝对 `runDir`，批次写入batch.json，最终HTML以report.htmlPath为准（批量index.html、单条report/index.html）。resume继续显式指定原目录；已有A仍由清单指定输入并保存新CV attempt，export-html/export-report继续显式指定交付路径。旧产物不移动，算法、身份/SHA、守卫、并发和HTML样式保持。本仓独立实现，不运行时导入其他技能。完整用法见SKILL.md的0.5.6节。
+
 ## 0.5.5高缓存基线的准入复核
 
 本版修正v1统计缺字段导致在RPA之前误把全部缓存算作工作集的路径。v1原生Linux的inactive_file是file LRU，不含tmpfs/shmem；缺失shmem仍如实保留missing字段，不填0，也不再次从file LRU扣除。dirty/writeback先用同层字段；任意原文total_*出现即固定total层级，坏值/重复/缺失的total字段不能降到local。只有缺少dirty/writeback时，才用只读原生/proc/meminfo前后两次Dirty/Writeback的较大值作全局观测上界代理。该来源独立记录nativeProcMeminfo、两点时间、原两行和各扣项来源，不伪装成cgroup字段；严格核验/proc挂载、覆盖/软链接、kB单位、非负值、重复与缺字段，失败保持raw回退。两点观测与内核统计非原子，不能保证整个间隔或未来的可回收容量。
